@@ -14,6 +14,7 @@ java {
 
 dependencies {
     implementation("com.typesafe.play:play_2.13:2.8.19")
+    implementation("com.typesafe.play:play-ahc-ws_2.13:2.8.19")
     implementation("com.fasterxml.jackson.core:jackson-databind:2.14.1")
     implementation("com.amazonaws:aws-xray-recorder-sdk-core:2.13.0")
 
