@@ -5,6 +5,9 @@ plugins {
     id("com.diffplug.spotless") version "6.14.0"
 }
 
+version = "0.0.1-SNAPSHOT"
+group = "net.moznion"
+
 repositories {
     mavenCentral()
 }
@@ -41,9 +44,7 @@ spotless {
 publishing {
     publications {
         create<MavenPublication>("maven") {
-            group = "net.moznion"
             artifactId = "aws-xray-java-recorder-sdk-play2.8_2.13"
-            version = "0.0.1-SNAPSHOT"
             from(components["java"])
             pom {
                 name.set("aws-xray-java-recorder-sdk-play2.8_2.13")
