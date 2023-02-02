@@ -9,12 +9,15 @@ import com.amazonaws.xray.entities.TraceID;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
+import play.Logger;
 import play.libs.typedmap.TypedKey;
 import play.mvc.Action;
 import play.mvc.Http;
 import play.mvc.Result;
 
 public class XRayTraceAction extends Action.Simple {
+  private static final Logger.ALogger logger = Logger.of(XRayTraceAction.class);
+
   public static final TypedKey<Segment> XRAY_SEGMENT_KEY = TypedKey.create("xraySegment");
 
   @Override
@@ -26,8 +29,8 @@ public class XRayTraceAction extends Action.Simple {
       traceHeader.setRootTraceId(TraceID.create());
     }
 
-    final Segment segment =
-        AWSXRay.beginSegment(XRayTraceAction.class.getName(), traceHeader.getRootTraceId(), null);
+    final Segment segment = AWSXRay.beginSegment(XRayTraceAction.class.getName());
+    segment.setTraceId(traceHeader.getRootTraceId());
     segment.putHttp(
         "request",
         Map.of(
@@ -36,6 +39,8 @@ public class XRayTraceAction extends Action.Simple {
             "user_agent", req.getHeaders().get("user-agent").orElse(""),
             "client_ip", req.getHeaders().get("x-forwarded-for").orElse(req.remoteAddress())));
     req.addAttr(XRAY_SEGMENT_KEY, segment);
+
+    logger.debug("begin a segment; traceId={}", traceHeader.getRootTraceId());
 
     try {
       return delegate
@@ -62,8 +67,10 @@ public class XRayTraceAction extends Action.Simple {
                 } finally {
                   try {
                     segment.close();
+                    logger.debug("segment closed; traceId={}", traceHeader.getRootTraceId());
                   } catch (RuntimeException ee) {
-                    // NOP
+                    logger.debug(
+                        "failed to close a segment; traceId={}", traceHeader.getRootTraceId());
                   }
                 }
               });
@@ -71,8 +78,12 @@ public class XRayTraceAction extends Action.Simple {
       // to catch the error from `delegate.call()`.
       try {
         segment.close();
+        logger.debug("segment closed exceptionally; traceId={}", traceHeader.getRootTraceId());
       } catch (RuntimeException ee) {
         // NOP
+        logger.debug(
+            "failed to close a segment in exception catching; traceId={}",
+            traceHeader.getRootTraceId());
       }
       throw e;
     }
