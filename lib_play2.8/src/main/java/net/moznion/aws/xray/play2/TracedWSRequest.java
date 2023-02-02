@@ -410,11 +410,18 @@ public class TracedWSRequest implements WSRequest {
       addHeader(TraceHeader.HEADER_KEY, TraceHeader.fromEntity(subsegment).toString());
     }
 
+    String httpRequestMethod;
+    try {
+      httpRequestMethod = req.getMethod();
+    } catch (RuntimeException e) {
+      // to catch the `UnsupportedOperationException` because `StandaloneWSRequest` might throw that
+      // exception to get a method.
+      httpRequestMethod = "error";
+    }
+
     subsegment.putHttp(
         "request",
-        Map.of(
-            "url", URLUtil.buildURLForXRay(req.getUrl()),
-            "method", req.getMethod()));
+        Map.of("url", URLUtil.buildURLForXRay(req.getUrl()), "method", httpRequestMethod));
 
     try {
       return requestExecutorSupplier
