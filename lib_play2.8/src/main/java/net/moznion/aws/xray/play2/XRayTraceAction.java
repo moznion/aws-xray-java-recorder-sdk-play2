@@ -38,52 +38,61 @@ public class XRayTraceAction extends Action.Simple {
             "method", req.method(),
             "user_agent", req.getHeaders().get("user-agent").orElse(""),
             "client_ip", req.getHeaders().get("x-forwarded-for").orElse(req.remoteAddress())));
-    req.addAttr(XRAY_SEGMENT_KEY, segment);
-
-    logger.debug("begin a segment; traceId={}", traceHeader.getRootTraceId());
+    logger.debug(
+        "begin a segment; traceId={}, id={}", traceHeader.getRootTraceId(), segment.getId());
 
     try {
       return delegate
-          .call(req)
+          .call(req.addAttr(XRAY_SEGMENT_KEY, segment))
           .whenCompleteAsync(
-              (res, error) -> {
-                try {
-                  segment.putHttp(
-                      "response",
-                      Map.of(
-                          "status", res.status(),
-                          "content_length", res.body().contentLength().orElse(-1L)));
+              (res, error) ->
+                  segment.run(
+                      () -> {
+                        try {
+                          segment.putHttp(
+                              "response",
+                              Map.of(
+                                  "status", res.status(),
+                                  "content_length", res.body().contentLength().orElse(-1L)));
 
-                  final int statusCode = res.status();
-                  if (400 <= statusCode && statusCode <= 499) {
-                    segment.setError(true);
-                    if (statusCode == TOO_MANY_REQUESTS_HTTP_STATUS_CODE) {
-                      segment.setThrottle(true);
-                    }
-                  }
-                  if (500 <= statusCode && statusCode <= 599) {
-                    segment.setFault(true);
-                  }
-                } finally {
-                  try {
-                    segment.close();
-                    logger.debug("segment closed; traceId={}", traceHeader.getRootTraceId());
-                  } catch (RuntimeException ee) {
-                    logger.debug(
-                        "failed to close a segment; traceId={}", traceHeader.getRootTraceId());
-                  }
-                }
-              });
+                          final int statusCode = res.status();
+                          if (400 <= statusCode && statusCode <= 499) {
+                            segment.setError(true);
+                            if (statusCode == TOO_MANY_REQUESTS_HTTP_STATUS_CODE) {
+                              segment.setThrottle(true);
+                            }
+                          }
+                          if (500 <= statusCode && statusCode <= 599) {
+                            segment.setFault(true);
+                          }
+                        } finally {
+                          try {
+                            segment.close();
+                            logger.debug(
+                                "segment closed; traceId={}, id={}",
+                                traceHeader.getRootTraceId(),
+                                segment.getId());
+                          } catch (RuntimeException ee) {
+                            logger.error(
+                                "failed to close a segment; traceId={}, id={}",
+                                traceHeader.getRootTraceId(),
+                                segment.getId());
+                          }
+                        }
+                      }));
     } catch (RuntimeException e) {
       // to catch the error from `delegate.call()`.
       try {
         segment.close();
-        logger.debug("segment closed exceptionally; traceId={}", traceHeader.getRootTraceId());
-      } catch (RuntimeException ee) {
-        // NOP
         logger.debug(
-            "failed to close a segment in exception catching; traceId={}",
-            traceHeader.getRootTraceId());
+            "segment closed exceptionally; traceId={}, id={}",
+            traceHeader.getRootTraceId(),
+            segment.getId());
+      } catch (RuntimeException ee) {
+        logger.error(
+            "failed to close a segment in exception catching; traceId={}, id={}",
+            traceHeader.getRootTraceId(),
+            segment.getId());
       }
       throw e;
     }

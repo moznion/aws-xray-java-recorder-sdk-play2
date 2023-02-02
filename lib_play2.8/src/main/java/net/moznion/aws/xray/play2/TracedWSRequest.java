@@ -17,8 +17,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import org.w3c.dom.Document;
+import play.Logger;
 import play.libs.ws.BodyWritable;
 import play.libs.ws.StandaloneWSRequest;
 import play.libs.ws.WSAuthInfo;
@@ -31,12 +33,14 @@ import play.libs.ws.WSSignatureCalculator;
 import play.mvc.Http;
 
 public class TracedWSRequest implements WSRequest {
-  private final WSRequest req;
-  private final Optional<Segment> maybeParentSegment;
+  private static final Logger.ALogger logger = Logger.of(TracedWSRequest.class);
 
-  public TracedWSRequest(final WSRequest req, final Optional<Segment> maybeParentSegment) {
+  private final WSRequest req;
+  private final Optional<Segment> maybeSegment;
+
+  public TracedWSRequest(final WSRequest req, final Optional<Segment> maybeSegment) {
     this.req = req;
-    this.maybeParentSegment = maybeParentSegment;
+    this.maybeSegment = maybeSegment;
   }
 
   @Override
@@ -396,69 +400,100 @@ public class TracedWSRequest implements WSRequest {
 
   private CompletionStage<WSResponse> executeWithWrappingXRaySubSegment(
       final Supplier<CompletionStage<WSResponse>> requestExecutorSupplier) {
-    final Subsegment subsegment = AWSXRay.beginSubsegment(TracedWSRequest.class.getName());
-    if (maybeParentSegment.isPresent()) {
-      final Segment parentSegment = maybeParentSegment.get();
-      subsegment.setTraceId(parentSegment.getTraceId());
-      subsegment.setParentId(parentSegment.getId());
-      subsegment.setParentSegment(parentSegment);
-      parentSegment.addSubsegment(subsegment);
-    }
-    subsegment.setNamespace(Namespace.REMOTE.toString());
-
-    if (subsegment.shouldPropagate()) {
-      addHeader(TraceHeader.HEADER_KEY, TraceHeader.fromEntity(subsegment).toString());
+    if (maybeSegment.isEmpty()) {
+      logger.debug("segment is missing so it runs the HTTP request without tracing");
+      return requestExecutorSupplier.get();
     }
 
-    String httpRequestMethod;
-    try {
-      httpRequestMethod = req.getMethod();
-    } catch (RuntimeException e) {
-      // to catch the `UnsupportedOperationException` because `StandaloneWSRequest` might throw that
-      // exception to get a method.
-      httpRequestMethod = "error";
-    }
+    final AtomicReference<CompletionStage<WSResponse>> respPromiseArc = new AtomicReference<>();
 
-    subsegment.putHttp(
-        "request",
-        Map.of("url", URLUtil.buildURLForXRay(req.getUrl()), "method", httpRequestMethod));
+    final Segment segment = maybeSegment.get();
+    segment.run(
+        () -> {
+          final Subsegment subsegment = AWSXRay.beginSubsegment(TracedWSRequest.class.getName());
+          logger.debug(
+              "begin a subsegment; traceId={}, id={}", subsegment.getTraceId(), subsegment.getId());
 
-    try {
-      return requestExecutorSupplier
-          .get()
-          .whenCompleteAsync(
-              (res, error) -> {
-                try {
-                  final int statusCode = res.getStatus();
-                  if (400 <= statusCode && statusCode <= 499) {
-                    subsegment.setError(true);
-                    if (statusCode == TOO_MANY_REQUESTS_HTTP_STATUS_CODE) {
-                      subsegment.setThrottle(true);
-                    }
-                  }
-                  if (500 <= statusCode && statusCode <= 599) {
-                    subsegment.setFault(true);
-                  }
-                  subsegment.putHttp(
-                      "response",
-                      Map.of("status", statusCode, "content_length", extractContentLength(res)));
-                } finally {
-                  try {
-                    subsegment.close();
-                  } catch (RuntimeException e) {
-                    // NOP
-                  }
-                }
-              });
-    } catch (RuntimeException e) {
-      // to catch the error from `req.XXX()`
-      try {
-        subsegment.close();
-      } catch (RuntimeException ee) {
-        // NOP
-      }
-      throw e;
-    }
+          subsegment.setNamespace(Namespace.REMOTE.toString());
+          if (subsegment.shouldPropagate()) {
+            addHeader(TraceHeader.HEADER_KEY, TraceHeader.fromEntity(subsegment).toString());
+          }
+
+          String httpRequestMethod;
+          try {
+            httpRequestMethod = req.getMethod();
+          } catch (RuntimeException e) {
+            // to catch the `UnsupportedOperationException` because `StandaloneWSRequest` might
+            // throw that
+            // exception to get a method.
+            httpRequestMethod = "unknown";
+          }
+
+          subsegment.putHttp(
+              "request",
+              Map.of("url", URLUtil.buildURLForXRay(req.getUrl()), "method", httpRequestMethod));
+
+          try {
+            respPromiseArc.set(
+                requestExecutorSupplier
+                    .get()
+                    .whenCompleteAsync(
+                        (res, error) ->
+                            subsegment.run(
+                                () -> {
+                                  try {
+                                    final int statusCode = res.getStatus();
+                                    if (400 <= statusCode && statusCode <= 499) {
+                                      subsegment.setError(true);
+                                      if (statusCode == TOO_MANY_REQUESTS_HTTP_STATUS_CODE) {
+                                        subsegment.setThrottle(true);
+                                      }
+                                    }
+                                    if (500 <= statusCode && statusCode <= 599) {
+                                      subsegment.setFault(true);
+                                    }
+                                    subsegment.putHttp(
+                                        "response",
+                                        Map.of(
+                                            "status",
+                                            statusCode,
+                                            "content_length",
+                                            extractContentLength(res)));
+                                  } finally {
+                                    try {
+                                      subsegment.close();
+                                      logger.debug(
+                                          "subsegment closed; traceId={}, id={}",
+                                          subsegment.getTraceId(),
+                                          subsegment.getId());
+                                    } catch (RuntimeException e) {
+                                      // NOP
+                                      logger.error(
+                                          "failed to close a segment; traceId={}, id={}",
+                                          subsegment.getTraceId(),
+                                          subsegment.getId());
+                                    }
+                                  }
+                                })));
+          } catch (RuntimeException e) {
+            // to catch the error from `req.XXX()`
+            try {
+              subsegment.close();
+              logger.debug(
+                  "subsegment closed exceptionally; traceId={}, id={}",
+                  subsegment.getTraceId(),
+                  subsegment.getId());
+            } catch (RuntimeException ee) {
+              logger.error(
+                  "failed to close a segment in exception catching; traceId={}, id={}",
+                  subsegment.getTraceId(),
+                  subsegment.getId());
+            }
+            throw e;
+          }
+        });
+
+    return respPromiseArc.get();
   }
 
   private int extractContentLength(final WSResponse res) {
