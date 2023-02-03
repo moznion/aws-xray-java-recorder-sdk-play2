@@ -3,6 +3,7 @@ package net.moznion.aws.xray.play2;
 import static net.moznion.aws.xray.play2.Constants.TOO_MANY_REQUESTS_HTTP_STATUS_CODE;
 
 import com.amazonaws.xray.AWSXRay;
+import com.amazonaws.xray.contexts.SegmentContext;
 import com.amazonaws.xray.entities.Segment;
 import com.amazonaws.xray.entities.TraceHeader;
 import com.amazonaws.xray.entities.TraceID;
@@ -27,6 +28,16 @@ public class XRayTraceAction extends Action.Simple {
         maybeTraceId.map(TraceHeader::fromString).orElse(new TraceHeader(TraceID.create()));
     if (traceHeader.getRootTraceId() == null) {
       traceHeader.setRootTraceId(TraceID.create());
+    }
+
+    // XXX:
+    // This clears trace entity if there is the existing segment context/entity previously to
+    // suppress "Beginning new segment while another segment exists in the segment context."
+    // error message.
+    final SegmentContext existingCtx =
+        AWSXRay.getGlobalRecorder().getSegmentContextResolverChain().resolve();
+    if (existingCtx != null) {
+      existingCtx.clearTraceEntity();
     }
 
     final Segment segment = AWSXRay.beginSegment(XRayTraceAction.class.getName());
